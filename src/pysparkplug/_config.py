@@ -108,10 +108,6 @@ class ClientOptions:
             implementation currently limited to 65555 (65535 messages in queue
             + 20 in flight). When the queue is full, any further outgoing
             messages would be dropped.
-        message_retry_timeout:
-            time in seconds before a message with QoS>0 is retried, if the
-            broker does not respond. This is set to 5 seconds by default and
-            should not normally need changing.
         reconnection_delay_min:
             when the connection is lost, the client will automatically retry
             connection. Initially, the attempt is delayed of min_delay seconds.
@@ -127,7 +123,6 @@ class ClientOptions:
 
     max_inflight_messages: int = 20
     max_queued_messages: int = 0
-    message_retry_timeout: int = 5
     reconnection_delay_min: int = 1
     reconnection_delay_max: int = 120
     reconnect_on_failure: bool = True

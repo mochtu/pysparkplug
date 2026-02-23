@@ -6,7 +6,6 @@ from pysparkplug import _payload as payload
 from pysparkplug._strenum import StrEnum
 
 __all__ = [
-    "ConnackCode",
     "ErrorCode",
     "MQTTProtocol",
     "MessageType",
@@ -59,30 +58,6 @@ _error_strings = {
     ErrorCode.ERRNO: "Error defined by errno",
     ErrorCode.QUEUE_SIZE: "Message queue full",
     ErrorCode.KEEPALIVE: "Client or broker did not communicate in the keepalive interval",
-}
-
-
-class ConnackCode(enum.IntEnum):
-    """MQTT Connection Acknowledgement codes"""
-
-    CONNACK_ACCEPTED = 0
-    CONNACK_REFUSED_PROTOCOL_VERSION = 1
-    CONNACK_REFUSED_IDENTIFIER_REJECTED = 2
-    CONNACK_REFUSED_SERVER_UNAVAILABLE = 3
-    CONNACK_REFUSED_BAD_USERNAME_PASSWORD = 4
-    CONNACK_REFUSED_NOT_AUTHORIZED = 5
-
-    def __str__(self) -> str:
-        return _connack_strings.get(self, "Connection Refused: unknown reason")
-
-
-_connack_strings = {
-    ConnackCode.CONNACK_ACCEPTED: "Connection accepted",
-    ConnackCode.CONNACK_REFUSED_PROTOCOL_VERSION: "Connection refused: unacceptable protocol version",
-    ConnackCode.CONNACK_REFUSED_IDENTIFIER_REJECTED: "Connection refused: identifier rejected",
-    ConnackCode.CONNACK_REFUSED_SERVER_UNAVAILABLE: "Connection refused: broker unavailable",
-    ConnackCode.CONNACK_REFUSED_BAD_USERNAME_PASSWORD: "Connection refused: bad user name or password",
-    ConnackCode.CONNACK_REFUSED_NOT_AUTHORIZED: "Connection refused: not authorised",
 }
 
 

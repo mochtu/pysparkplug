@@ -61,11 +61,45 @@ def check_float(
             )
 
 
-def delta(value: Union[float, np.single], single: bool = False):
+def _delta_float32(value: Union[float, np.single]) -> float:
+    cast_value = np.float32(value)
+    if not np.isfinite(cast_value):
+        return 0.0
+    if cast_value == np.float32(0):
+        # Smallest positive subnormal for float32.
+        return float(np.nextafter(np.float32(0), np.float32(1), dtype=np.float32))
+
+    nearest = np.nextafter(cast_value, np.float32(0), dtype=np.float32)
+    ulp = float(abs(cast_value - nearest))
+    if np.isfinite(ulp) and ulp > 0:
+        return ulp
+
+    finfo32 = np.finfo(np.float32)
+    return max(float(abs(cast_value)) * float(finfo32.eps), float(finfo32.tiny))
+
+
+def _delta_float64(value: Union[float, np.single]) -> float:
+    cast_value = np.float64(value)
+    if not np.isfinite(cast_value):
+        return 0.0
+    if cast_value == np.float64(0):
+        # Smallest positive subnormal for float64.
+        return float(np.nextafter(np.float64(0), np.float64(1), dtype=np.float64))
+
+    nearest = np.nextafter(cast_value, np.float64(0), dtype=np.float64)
+    ulp = float(abs(cast_value - nearest))
+    if np.isfinite(ulp) and ulp > 0:
+        return ulp
+
+    finfo64 = np.finfo(np.float64)
+    return max(float(abs(cast_value)) * float(finfo64.eps), float(finfo64.tiny))
+
+
+def delta(value: Union[float, np.single], single: bool = False) -> float:
     """Expected float precision error for this value"""
     if single:
-        value = np.single(value)
-    return np.nextafter(value, np.inf) - value
+        return _delta_float32(value)
+    return _delta_float64(value)
 
 
 class TestScalarTypes(unittest.TestCase):

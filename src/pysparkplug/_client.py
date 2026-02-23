@@ -1,7 +1,7 @@
 """Module containing the low-level Sparkplug B client"""
 
 import logging
-from typing import Any, Callable, Optional, Union
+from typing import Callable, Literal, Optional, Union, cast
 
 from paho.mqtt import client as paho_mqtt
 
@@ -12,7 +12,7 @@ from pysparkplug._constants import (
     DEFAULT_CLIENT_KEEPALIVE,
     DEFAULT_CLIENT_PORT,
 )
-from pysparkplug._enums import ErrorCode, MQTTProtocol, QoS, Transport
+from pysparkplug._enums import ErrorCode, MQTTProtocol, QoS
 from pysparkplug._error import check_connack_code, check_error_code
 from pysparkplug._message import Message
 from pysparkplug._payload import Birth
@@ -55,15 +55,15 @@ class Client:
         transport_config: Optional[Union[TLSConfig, WSConfig]] = None,
         client_options: ClientOptions = ClientOptions(),
     ) -> None:
+        transport: Literal["websockets", "tcp"] = (
+            "websockets" if isinstance(transport_config, WSConfig) else "tcp"
+        )
         self._client = paho_mqtt.Client(
-            client_id=client_id,  # type: ignore[reportArgumentType]
+            paho_mqtt.CallbackAPIVersion.VERSION2,
+            client_id=client_id,
             clean_session=True,
-            protocol=protocol,
-            transport=(
-                Transport.WS
-                if isinstance(transport_config, WSConfig)
-                else Transport.TCP
-            ),
+            protocol=cast(paho_mqtt.MQTTProtocolVersion, protocol),
+            transport=transport,
             reconnect_on_failure=client_options.reconnect_on_failure,
         )
         self._client.enable_logger(logger)
@@ -91,7 +91,6 @@ class Client:
         self._client.max_queued_messages_set(
             queue_size=client_options.max_queued_messages
         )
-        self._client.message_retry_set(retry=client_options.message_retry_timeout)
         self._client.reconnect_delay_set(
             min_delay=client_options.reconnection_delay_min,
             max_delay=client_options.reconnection_delay_max,
@@ -145,11 +144,12 @@ class Client:
 
         def cb(
             _client: paho_mqtt.Client,
-            _userdata: dict[Any, Any],
-            _flags: dict[Any, Any],
-            rc: int,
+            _userdata: object,
+            _flags: paho_mqtt.ConnectFlags,
+            reason_code: paho_mqtt.ReasonCode,
+            _properties: Optional[paho_mqtt.Properties],
         ) -> None:
-            self._on_connect(rc)
+            self._on_connect(reason_code)
             if callback is not None:
                 callback(self)
 
@@ -165,8 +165,8 @@ class Client:
         else:
             self._client.loop_start()
 
-    def _on_connect(self, rc: int) -> None:
-        check_connack_code(rc)
+    def _on_connect(self, reason_code: paho_mqtt.ReasonCode) -> None:
+        check_connack_code(reason_code)
         self._births.clear()
         for topic, qos in list(self._subscriptions.items()):
             self._subscribe(topic=topic, qos=qos)
@@ -219,7 +219,7 @@ class Client:
 
         def cb(
             _client: paho_mqtt.Client,
-            _userdata: dict[Any, Any],
+            _userdata: object,
             mqtt_message: paho_mqtt.MQTTMessage,
         ) -> None:
             message = self._handle_message(mqtt_message)

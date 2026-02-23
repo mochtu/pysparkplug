@@ -2,7 +2,9 @@
 
 from typing import Optional
 
-from pysparkplug._enums import ConnackCode, ErrorCode
+from paho.mqtt import client as paho_mqtt
+
+from pysparkplug._enums import ErrorCode
 
 __all__ = ["MQTTError"]
 
@@ -21,11 +23,7 @@ def check_error_code(
             raise MQTTError(error_code)
 
 
-def check_connack_code(
-    connack_int: int, *, ignore_codes: Optional[set[ConnackCode]] = None
-) -> None:
+def check_connack_code(reason_code: paho_mqtt.ReasonCode) -> None:
     """Validate connack code"""
-    if connack_int > 0:
-        connack_code = ConnackCode(connack_int)
-        if ignore_codes is None or connack_code not in ignore_codes:
-            raise ConnectionError(connack_code)
+    if reason_code != 0:
+        raise ConnectionError(str(reason_code))

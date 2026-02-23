@@ -6,7 +6,6 @@ from pysparkplug._config import ClientOptions, TLSConfig, WSConfig
 from pysparkplug._datatype import DataType
 from pysparkplug._edge_node import Device, EdgeNode
 from pysparkplug._enums import (
-    ConnackCode,
     ErrorCode,
     MessageType,
     MQTTProtocol,
@@ -37,7 +36,6 @@ __all__ = [
     "SINGLE_LEVEL_WILDCARD",
     "Client",
     "ClientOptions",
-    "ConnackCode",
     "DBirth",
     "DCmd",
     "DData",
