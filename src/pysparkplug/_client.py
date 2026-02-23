@@ -4,6 +4,8 @@ import logging
 from typing import Callable, Literal, Optional, Union, cast
 
 from paho.mqtt import client as paho_mqtt
+from paho.mqtt.packettypes import PacketTypes
+from paho.mqtt.properties import Properties
 
 from pysparkplug._config import ClientOptions, TLSConfig, WSConfig
 from pysparkplug._constants import (
@@ -43,6 +45,7 @@ class Client:
     """
 
     _client: paho_mqtt.Client
+    _protocol: MQTTProtocol
     _subscriptions: dict[Topic, QoS]
     _births: dict[tuple[Optional[str], Optional[str], Optional[str]], Birth]
 
@@ -58,14 +61,24 @@ class Client:
         transport: Literal["websockets", "tcp"] = (
             "websockets" if isinstance(transport_config, WSConfig) else "tcp"
         )
-        self._client = paho_mqtt.Client(
-            paho_mqtt.CallbackAPIVersion.VERSION2,
-            client_id=client_id,
-            clean_session=True,
-            protocol=cast(paho_mqtt.MQTTProtocolVersion, protocol),
-            transport=transport,
-            reconnect_on_failure=client_options.reconnect_on_failure,
-        )
+        self._protocol = protocol
+        if protocol == MQTTProtocol.MQTT_V5:
+            self._client = paho_mqtt.Client(
+                paho_mqtt.CallbackAPIVersion.VERSION2,
+                client_id=client_id,
+                protocol=cast(paho_mqtt.MQTTProtocolVersion, protocol),
+                transport=transport,
+                reconnect_on_failure=client_options.reconnect_on_failure,
+            )
+        else:
+            self._client = paho_mqtt.Client(
+                paho_mqtt.CallbackAPIVersion.VERSION2,
+                client_id=client_id,
+                clean_session=True,  # Sparkplug requires clean sessions for MQTT 3.1.1.
+                protocol=cast(paho_mqtt.MQTTProtocolVersion, protocol),
+                transport=transport,
+                reconnect_on_failure=client_options.reconnect_on_failure,
+            )
         self._client.enable_logger(logger)
         if username is not None:
             self._client.username_pw_set(username=username, password=password)
@@ -154,12 +167,24 @@ class Client:
                 callback(self)
 
         self._client.on_connect = cb
-        self._client.connect(
-            host=host,
-            port=port,
-            keepalive=keepalive,
-            bind_address=bind_address,
-        )
+        if self._protocol == MQTTProtocol.MQTT_V5:
+            connect_properties = Properties(PacketTypes.CONNECT)
+            connect_properties.SessionExpiryInterval = 0
+            self._client.connect(
+                host=host,
+                port=port,
+                keepalive=keepalive,
+                bind_address=bind_address,
+                clean_start=True,
+                properties=connect_properties,
+            )
+        else:
+            self._client.connect(
+                host=host,
+                port=port,
+                keepalive=keepalive,
+                bind_address=bind_address,
+            )
         if blocking:
             self._client.loop_forever()
         else:
@@ -199,6 +224,13 @@ class Client:
             retain=message.retain,
         )
         check_error_code(result.rc)
+        if isinstance(message.payload, Birth):
+            key = (
+                message.topic.group_id,
+                message.topic.edge_node_id,
+                message.topic.device_id,
+            )
+            self._births[key] = message.payload
 
     def subscribe(
         self,

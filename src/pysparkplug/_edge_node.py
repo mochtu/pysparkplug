@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import logging
 from typing import Callable, Iterable, Optional
@@ -25,11 +26,22 @@ from pysparkplug._types import Self
 __all__ = ["Device", "EdgeNode"]
 logger = logging.getLogger(__name__)
 BD_SEQ = "bdSeq"
+NODE_CONTROL_REBIRTH = "Node Control/Rebirth"
 SEQ_LIMIT = 256
 
 
 def _default_cmd_callback(_: EdgeNode, message: Message) -> None:
     logger.info(f"Received command {message}")
+
+
+def _validate_aliases(metrics: dict[str, Metric], *, source: str) -> None:
+    aliases = [metric.alias for metric in metrics.values() if metric.alias is not None]
+    if len(aliases) != len(set(aliases)):
+        raise ValueError(f"Duplicate metric aliases found in {source}")
+    if aliases and any(metric.alias is None for metric in metrics.values()):
+        raise ValueError(
+            f"All metrics in {source} must define aliases when alias mode is enabled"
+        )
 
 
 class EdgeNode:
@@ -59,6 +71,7 @@ class EdgeNode:
     _client: Client
 
     _bd_seq_metric: Metric
+    _session_bd_seq_metric: Metric
     __seq_cycler: itertools.cycle[int] = itertools.cycle(range(SEQ_LIMIT))
     __bd_seq_cycler: itertools.cycle[int] = itertools.cycle(range(SEQ_LIMIT))
     _connected: bool = False
@@ -75,6 +88,7 @@ class EdgeNode:
         self.edge_node_id = edge_node_id
         self._setup_metrics(metrics)
         self._devices = {}
+        self._validate_global_alias_uniqueness()
         self._client = client if client is not None else Client()
 
         # Subscribe to NCMD
@@ -101,6 +115,50 @@ class EdgeNode:
                     f"Metric {metric} must have a defined datatype when provided to an Edge Node"
                 )
             self._metrics[metric.name] = metric
+        _validate_aliases(self._metrics, source="edge node metrics")
+
+    @property
+    def _alias_mode_enabled(self) -> bool:
+        return any(metric.alias is not None for metric in self._metrics.values())
+
+    def _collect_used_aliases(self) -> set[int]:
+        aliases = {
+            metric.alias
+            for metric in self._metrics.values()
+            if metric.alias is not None
+        }
+        for device in self._devices.values():
+            aliases.update(
+                metric.alias for metric in device.metrics.values() if metric.alias is not None
+            )
+        return aliases
+
+    @staticmethod
+    def _next_alias(used_aliases: set[int]) -> int:
+        alias = 0
+        while alias in used_aliases:
+            alias += 1
+        return alias
+
+    def _validate_global_alias_uniqueness(self) -> None:
+        seen: dict[int, str] = {}
+        for metric in self._metrics.values():
+            if metric.alias is None:
+                continue
+            if metric.alias in seen:
+                raise ValueError(
+                    f"Duplicate alias {metric.alias} used by {seen[metric.alias]} and edge metric {metric.name}"
+                )
+            seen[metric.alias] = f"edge metric {metric.name}"
+        for device in self._devices.values():
+            for metric in device.metrics.values():
+                if metric.alias is None:
+                    continue
+                if metric.alias in seen:
+                    raise ValueError(
+                        f"Duplicate alias {metric.alias} used by {seen[metric.alias]} and device {device.device_id} metric {metric.name}"
+                    )
+                seen[metric.alias] = f"device {device.device_id} metric {metric.name}"
 
     def _setup_will(self) -> None:
         """Set the bdSeq metric and set the will with an NDEATH message with
@@ -121,9 +179,56 @@ class EdgeNode:
             timestamp=get_current_timestamp(), bd_seq_metric=self._bd_seq_metric
         )
         will_message = Message(
-            topic=will_topic, payload=will_payload, qos=QoS.AT_MOST_ONCE, retain=False
+            topic=will_topic, payload=will_payload, qos=QoS.AT_LEAST_ONCE, retain=False
         )
         self._client.set_will(will_message)
+
+    def _get_nbirth_metrics(self) -> tuple[Metric, ...]:
+        used_aliases = self._collect_used_aliases()
+        metrics: list[Metric] = list(self._metrics.values())
+        rebirth_metric = self._metrics.get(NODE_CONTROL_REBIRTH)
+        if rebirth_metric is None:
+            # Required by Sparkplug for all NBIRTH payloads.
+            rebirth_metric = Metric(
+                timestamp=get_current_timestamp(),
+                name=NODE_CONTROL_REBIRTH,
+                datatype=DataType.BOOLEAN,
+                value=False,
+                alias=(
+                    self._next_alias(used_aliases) if self._alias_mode_enabled else None
+                ),
+            )
+            if rebirth_metric.alias is not None:
+                used_aliases.add(rebirth_metric.alias)
+            metrics.append(rebirth_metric)
+        elif rebirth_metric.datatype != DataType.BOOLEAN:
+            raise ValueError(
+                f"{NODE_CONTROL_REBIRTH} metric must have boolean datatype"
+            )
+        elif rebirth_metric.value is not False:
+            # Required by Sparkplug for NBIRTH.
+            metrics = [
+                metric
+                if metric.name != NODE_CONTROL_REBIRTH
+                else dataclasses.replace(metric, value=False)
+                for metric in metrics
+            ]
+
+        if self._alias_mode_enabled and rebirth_metric.alias is None:
+            raise ValueError(
+                f"{NODE_CONTROL_REBIRTH} metric must define an alias when alias mode is enabled"
+            )
+
+        bd_seq_metric = self._session_bd_seq_metric
+        if self._alias_mode_enabled:
+            if bd_seq_metric.alias is None:
+                bd_seq_metric = dataclasses.replace(
+                    bd_seq_metric,
+                    alias=self._next_alias(used_aliases),
+                )
+            used_aliases.add(bd_seq_metric.alias)  # type: ignore[arg-type]
+        metrics.append(bd_seq_metric)
+        return tuple(metrics)
 
     def connect(
         self,
@@ -156,6 +261,7 @@ class EdgeNode:
             self._connected = True
             # Reset seq cycler
             self.__seq_cycler = itertools.cycle(range(SEQ_LIMIT))
+            self._session_bd_seq_metric = self._bd_seq_metric
 
             # Publish NBIRTH
             n_birth_topic = Topic(
@@ -163,9 +269,10 @@ class EdgeNode:
                 group_id=self.group_id,
                 edge_node_id=self.edge_node_id,
             )
-            metrics = (*self._metrics.values(), self._bd_seq_metric)
             n_birth = NBirth(
-                timestamp=get_current_timestamp(), seq=self._seq, metrics=metrics
+                timestamp=get_current_timestamp(),
+                seq=self._seq,
+                metrics=self._get_nbirth_metrics(),
             )
             client.publish(
                 Message(
@@ -221,7 +328,8 @@ class EdgeNode:
                 edge_node_id=self.edge_node_id,
             )
             n_death = NDeath(
-                timestamp=get_current_timestamp(), bd_seq_metric=self._bd_seq_metric
+                timestamp=get_current_timestamp(),
+                bd_seq_metric=self._session_bd_seq_metric,
             )
             ndeath_message = Message(
                 topic=n_death_topic, payload=n_death, qos=QoS.AT_MOST_ONCE, retain=False
@@ -244,6 +352,11 @@ class EdgeNode:
                 "is already registered with this edge node with that id"
             )
         self._devices[device.device_id] = device
+        try:
+            self._validate_global_alias_uniqueness()
+        except Exception:
+            del self._devices[device.device_id]
+            raise
         d_cmd_topic = Topic(
             message_type=MessageType.DCMD,
             group_id=self.group_id,
@@ -371,6 +484,7 @@ class EdgeNode:
             metrics:
                 an iterable of metrics to be updated
         """
+        publish_metrics: list[Metric] = []
         for metric in metrics:
             if metric.name is None:
                 raise ValueError(
@@ -387,7 +501,17 @@ class EdgeNode:
                     f"Metric datatype provided {metric.datatype} "
                     f"doesn't match {curr_metric.datatype}"
                 )
-            self._metrics[metric.name] = metric
+            if metric.alias is not None and metric.alias != curr_metric.alias:
+                raise ValueError(
+                    f"Metric alias provided {metric.alias} doesn't match {curr_metric.alias}"
+                )
+            updated_metric = dataclasses.replace(metric, alias=curr_metric.alias)
+            self._metrics[metric.name] = updated_metric
+            if updated_metric.alias is None:
+                publish_metrics.append(updated_metric)
+            else:
+                publish_metrics.append(dataclasses.replace(updated_metric, name=None))
+        self._validate_global_alias_uniqueness()
 
         topic = Topic(
             message_type=MessageType.NDATA,
@@ -395,11 +519,12 @@ class EdgeNode:
             edge_node_id=self.edge_node_id,
         )
         n_data = NData(
-            timestamp=get_current_timestamp(), seq=self._seq, metrics=tuple(metrics)
+            timestamp=get_current_timestamp(),
+            seq=self._seq,
+            metrics=tuple(publish_metrics),
         )
         self._client.publish(
             Message(topic=topic, payload=n_data, qos=QoS.AT_MOST_ONCE, retain=False),
-            include_dtypes=True,
         )
 
     def update_device(self, device_id: str, metrics: Iterable[Metric]) -> None:
@@ -411,6 +536,7 @@ class EdgeNode:
             metrics:
                 an iterable of metrics to be updated
         """
+        update_metrics = tuple(metrics)
         try:
             device = self._devices[device_id]
         except KeyError as exc:
@@ -418,19 +544,32 @@ class EdgeNode:
                 f"Unable to update device {device_id} as no device with that id is "
                 "registered to this edge node"
             ) from exc
-        device.update(metrics)
+        device.update(update_metrics)
+        publish_metrics = []
+        updated_device_metrics = device.metrics
+        for metric in update_metrics:
+            # Device.update validates that all updated metrics have names and exist.
+            updated_metric = updated_device_metrics[metric.name]  # type: ignore[index]
+            if updated_metric.alias is None:
+                publish_metrics.append(updated_metric)
+            else:
+                publish_metrics.append(dataclasses.replace(updated_metric, name=None))
+        self._validate_global_alias_uniqueness()
         d_data_topic = Topic(
             message_type=MessageType.DDATA,
             group_id=self.group_id,
             edge_node_id=self.edge_node_id,
             device_id=device_id,
         )
-        d_data = DData(get_current_timestamp(), seq=self._seq, metrics=tuple(metrics))
+        d_data = DData(
+            get_current_timestamp(),
+            seq=self._seq,
+            metrics=tuple(publish_metrics),
+        )
         self._client.publish(
             Message(
                 topic=d_data_topic, payload=d_data, qos=QoS.AT_MOST_ONCE, retain=False
             ),
-            include_dtypes=True,
         )
 
     @property
@@ -482,6 +621,7 @@ class Device:
                     f"Metric {metric} must have a defined datatype when provided to an Edge Node"
                 )
             self._metrics[metric.name] = metric
+        _validate_aliases(self._metrics, source=f"device {self.device_id} metrics")
 
     @property
     def metrics(self) -> dict[str, Metric]:
@@ -511,4 +651,11 @@ class Device:
                     f"Metric datatype provided {metric.datatype} "
                     f"doesn't match {curr_metric.datatype}"
                 )
-            self._metrics[metric.name] = metric
+            if metric.alias is not None and metric.alias != curr_metric.alias:
+                raise ValueError(
+                    f"Metric alias provided {metric.alias} doesn't match {curr_metric.alias}"
+                )
+            self._metrics[metric.name] = dataclasses.replace(
+                metric,
+                alias=curr_metric.alias,
+            )
